@@ -39,7 +39,8 @@
 #define PCF8591_ADC_CH3		0x43
 #define SERVO_MAX			260
 #define SERVO_MIN			70
-#define DEBUGGING			1
+#define DEBUGGING			1		// 1=true, 0=false
+#define WATCHDOG			2500000	//TUNE THIS VALUE FOR TIME TO DRIVE WOUT RESCANNING FOR LIGHT
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -78,7 +79,7 @@ static void MX_TIM2_Init(void);
 static void MX_TIM5_Init(void);
 /* USER CODE BEGIN PFP */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim);
-void Read_Distance();
+void Read_Distance(uint8_t num_times);
 uint8_t Read_Brightness();
 void Set_Angle(uint8_t angle, uint32_t max, uint32_t min);
 uint8_t Scan_Region_Brightness();
@@ -103,7 +104,7 @@ static volatile uint32_t capture = 0;
 static uint32_t polarity;
 static uint8_t light_angle;
 static uint8_t clear_angle;
-static uint32_t watchdog = 2500000;
+static uint32_t watchdog = WATCHDOG;
 static int32_t global_angle = 0;
 static uint32_t right_dist = 0;
 static uint32_t left_dist = 0;
@@ -186,7 +187,7 @@ int main(void)
 	case FaceLight:			//1
 		Turn_To_Face(light_angle);
 		Set_Angle(90, SERVO_MAX, SERVO_MIN);
-		HAL_Delay(2000);	//wait for servo to turn
+		HAL_Delay(1000);	//wait for servo to turn
 		state = DriveToLight;
 		break;
 
@@ -194,17 +195,17 @@ int main(void)
 		__HAL_TIM_SetCompare(&htim2, TIM_CHANNEL_3, 2);	//set trigger with 20us pulse)
 		if(watchdog == 0){
 			Stop_Moving();
-			watchdog = 2500000;
+			watchdog = WATCHDOG;
 			__HAL_TIM_SetCompare(&htim2, TIM_CHANNEL_3, 0);	//set trigger with 20us pulse)
 			state = ScanLight;
 			break;
 		}
-//		Read_Distance();
-		if(distance < 8 && watchdog < 2420000){
+
+		if(distance < 8 && watchdog < (uint32_t)(0.97*WATCHDOG)){
 			Stop_Moving();
 			__HAL_TIM_SetCompare(&htim2, TIM_CHANNEL_3, 0);	//set trigger with 20us pulse)
 			state = ObstacleDetected;
-			watchdog = 2500000;
+			watchdog = WATCHDOG;
 			break;
 		}
 		Move_Forward(1000, 200, 1);
@@ -212,27 +213,26 @@ int main(void)
 		break;
 
 	case ObstacleDetected:	//3
-
-//		Set_Angle(90, SERVO_MAX, SERVO_MIN);
+		// look right and take the distance measurement
 		Set_Angle(180, SERVO_MAX, SERVO_MIN);
-		HAL_Delay(2000);
-		Read_Distance();
-		Read_Distance();
+		HAL_Delay(1000);	// wait for servo to turn
+		Read_Distance(2);	// read distance twice to protect against errors
 		right_dist = distance;
 
-//		Turn_To_Face(10);
-//		Turn_To_Face(10);
+		// look left and take the distance measurement
 		Set_Angle(0, SERVO_MAX, SERVO_MIN);
-		HAL_Delay(2000);
-		Read_Distance();
-		Read_Distance();
+		HAL_Delay(1000);	// wait for servo to turn
+		Read_Distance(2);	// read distance twice to protect against errors
 		left_dist = distance;
+
+		// case if the right is more open
 		if(right_dist > 10 && right_dist > left_dist){
 			Turn_To_Face(150);
 			state = InchForward;
 			went_right = 1;
 			break;
 		}
+		// case if the left is more open
 		if(left_dist > 10 && left_dist > right_dist){
 			Turn_To_Face(25);
 			state = InchForward;
@@ -240,18 +240,24 @@ int main(void)
 			break;
 		}
 
-		//right and left are both blocked
-//		Turn_To_Face(10);
+		// case if the right and left are both blocked
 		Turn_To_Face(150);
-		Turn_To_Face(150);
-		Read_Distance();
-		Read_Distance();
+		Turn_To_Face(150);	// make two 90deg turns
+		Read_Distance(2);	// read distance twice to protect against errors
+
+		// case if area behind is also blocked
+		// turn back to face front and restart state machine
+		if(distance < 10){
+			Turn_To_Face(150);
+			Turn_To_Face(150);	// make two 90deg turns
+			state = ScanLight;
+			break;
+		}
+
+		// otherwise drive away from obstacles and look for clear space
 		Move_Forward(2000, 200, 0);
 		Turn_To_Face(150);
-		Turn_To_Face(150);
-
-
-
+		Turn_To_Face(150);	// make two 90deg turns
 		state = ScanAvoidance;
 		break;
 
@@ -270,9 +276,9 @@ int main(void)
 	case FaceClearPath:		//5
 		Turn_To_Face(clear_angle);
 		Set_Angle(90, SERVO_MAX, SERVO_MIN);
-		HAL_Delay(2000);
+		HAL_Delay(1000);
 
-		Read_Distance();
+		Read_Distance(1);
 		if(distance < 10){
 			state = ObstacleDetected;
 			break;
@@ -282,98 +288,71 @@ int main(void)
 		break;
 
 	case InchForward:		//6
-		if(went_right == 1){
+		// case if the robot is going right or left to avoid obstacles
+		if(went_right == 1 || went_left == 1){
+			// look to the obstacle and check the distance
 			inch_counter = 0;
-			Set_Angle(0, SERVO_MAX, SERVO_MIN);
-			HAL_Delay(100);
-			Read_Distance();
-			Read_Distance();
+			Set_Angle(180*went_left, SERVO_MAX, SERVO_MIN);	// look right if went_left else look left
+			HAL_Delay(50);
+			Read_Distance(2);
+
+			// run loop a max of 4 times to check distances and keep inching forward
+			// otherwise reset to the ObstacleDetected state
 			while(distance < 10){
 				if(inch_counter == 4){
 					state = ObstacleDetected;
 					inch_counter = 0;
-					went_right = 0;
+					went_right = went_left = 0;
 					break;
 				}
+				// inch forward and check the distance in front of the robot
 				Move_Forward(1000, 150, 0);
-				Read_Distance();
-				Read_Distance();
-				Read_Distance();
 				Set_Angle(90, SERVO_MAX, SERVO_MIN);
-				HAL_Delay(2000);
-				Read_Distance();
-				Read_Distance();
-				Read_Distance();
+				HAL_Delay(1000);
+				Read_Distance(3);
+
+				// case if there is an obstacle detected in front of the robot
+				// go back to ObstacleDetected state
 				if(distance < 10){
 					state = ObstacleDetected;
 					inch_counter = 0;
-					went_right = 0;
+					went_right = went_left = 0;
 					break;
 				}
-				Set_Angle(0, SERVO_MAX, SERVO_MIN);
-				HAL_Delay(2000);
-				Read_Distance();
-				Read_Distance();
-				Read_Distance();
+
+				// turn back to face original obstacle and update distance
+				Set_Angle(180*went_left, SERVO_MAX, SERVO_MIN);	// look right if went_left else look left
+				HAL_Delay(1000);
+				Read_Distance(3);
 				inch_counter = inch_counter + 1;
 			}
+
+			// obstacle was cleared!
+			// inch forward one more time to make entire robot clear obstacle
+			// move on to re-scan the area for light source
 			Move_Forward(1200, 150, 0);
-			Turn_To_Face(22);
-			Set_Angle(90, SERVO_MAX, SERVO_MIN);
-			state = ScanLight;
-			went_right = 0;
-		}else if(went_left == 1){
-			inch_counter = 0;
-			Set_Angle(180, SERVO_MAX, SERVO_MIN);
-			HAL_Delay(100);
-			Read_Distance();
-			Read_Distance();
-			while(distance < 10){
-				if(inch_counter == 4){
-					state = ObstacleDetected;
-					inch_counter = 0;
-					went_left = 0;
-					break;
-				}
-				Move_Forward(1000, 150, 0);
-				Read_Distance();
-				Read_Distance();
-				Read_Distance();
-				Set_Angle(90, SERVO_MAX, SERVO_MIN);
-				HAL_Delay(2000);
-				Read_Distance();
-				Read_Distance();
-				Read_Distance();
-				if(distance < 10){
-					state = ObstacleDetected;
-					inch_counter = 0;
-					went_left = 0;
-					break;
-				}
-				Set_Angle(180, SERVO_MAX, SERVO_MIN);
-				HAL_Delay(2000);
-				Read_Distance();
-				Read_Distance();
-				Read_Distance();
-				inch_counter = inch_counter + 1;
+			if(went_right){
+				Turn_To_Face(22);
 			}
-			Move_Forward(1000, 150, 0);
-			Turn_To_Face(165);
+			else if(went_left){
+				Turn_To_Face(165);
+			}
 			Set_Angle(90, SERVO_MAX, SERVO_MIN);
 			state = ScanLight;
-			went_left = 0;
-		}else{
-			Move_Forward(1000, 100, 0);
+			went_right = went_left = 0;
+		}
+		// case left and right were both blocked
+		// so, drive back to open space
+		else{
+			Move_Forward(1000, 150, 0);
 			if(clear_angle > 90){
-	//			Set_Angle(180-clear_angle, SERVO_MAX, SERVO_MIN);
 				Set_Angle((180-clear_angle), SERVO_MAX, SERVO_MIN);
 			}
 			else if(clear_angle < 90){
-	//			Set_Angle(180, SERVO_MAX, SERVO_MIN);
 				Set_Angle((180-clear_angle), SERVO_MAX, SERVO_MIN);
 			}
-			HAL_Delay(2000);
-			Read_Distance();
+			HAL_Delay(1000);
+			Read_Distance(1);
 			if(distance < 6){
 				//didn't clear object yet
 				state = ObstacleDetected;
@@ -952,8 +931,8 @@ uint8_t Scan_Region_Obstacles(){
 
 	for(uint32_t angle=0; angle <= 180; angle = angle + 10){
 		Set_Angle(angle, SERVO_MAX, SERVO_MIN);
-		HAL_Delay(250);
-		Read_Distance();
+		HAL_Delay(125);
+		Read_Distance(1);
 		if(distance > max_dist && distance < 150){
 			max_dist = distance;
 			max_angle = angle;
@@ -993,7 +972,7 @@ uint8_t Scan_Region_Brightness(){
 
 	for(uint32_t angle=0; angle <= 180; angle = angle + 10){
 		Set_Angle(angle, SERVO_MAX, SERVO_MIN);
-		HAL_Delay(250);
+		HAL_Delay(125);
 		uint8_t brightness = Read_Brightness();
 		brightnesses[angle/10] = brightness;
 		if(brightness < max_bright){
@@ -1069,12 +1048,12 @@ uint8_t Read_Brightness(){
  * @param 	debug: a boolean that will enable putty output
  * @retval 	raw: a uint32_t raw value of distance reading
  */
-void Read_Distance(){
+void Read_Distance(uint8_t num_times){
 	//start reading
 	__HAL_TIM_SetCompare(&htim2, TIM_CHANNEL_3, 2);	//set trigger with 20us pulse)
 
 	//give time to grab reading
-	HAL_Delay(250);
+	HAL_Delay(200*num_times);
 
 	//stop sending trigger to read
 	__HAL_TIM_SetCompare(&htim2, TIM_CHANNEL_3, 0);	//set trigger with no pulse)
